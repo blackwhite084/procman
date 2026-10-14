@@ -100,6 +100,7 @@ enum WallActions {
             let ch = e.charactersIgnoringModifiers?.lowercased() ?? ""
             if cmd, ch == "d", let i { wall.remove(items[i]); wall.selection = wall.items[safe: i]?.id ?? wall.items.last?.id }
             else if cmd, ch == "e", let i { wall.editing = items[i].id }
+            else if cmd, ch == "n" { UserDefaults.standard.set(true, forKey: "memoColumn"); Memos.shared.focusInput += 1 }
             else if !cmd, let n = Int(ch), n >= 1, n <= min(9, items.count), case .live(let w) = items[n - 1] { jump(w) }
             else { return false }
         }
@@ -140,10 +141,39 @@ extension Wall {
 
 struct WallView: View {
     @Environment(Wall.self) private var wall
+    @AppStorage("memoColumn") private var memoColumn = true
 
     var body: some View {
+        HStack(spacing: 0) {
+            wallContent
+            if memoColumn {
+                Divider()
+                MemoColumn().environment(Memos.shared).frame(width: 280)
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { WallActions.manage() } label: { Label("管理监控", systemImage: "rectangle.stack.badge.plus") }
+                    .help("勾选要监控的窗口、编辑备注")
+                Button { memoColumn.toggle() } label: { Label("待办", systemImage: "sidebar.right") }
+                    .help(memoColumn ? "收起待办栏" : "展开待办栏（⌘N 记一件事）")
+            }
+        }
+        .onAppear {
+            wall.editing = nil
+            if wall.selection == nil { wall.selection = wall.items.first?.id }
+            wall.startLive()
+            WallActions.attachKeys()
+        }
+        .onDisappear {
+            wall.stopLive()
+            WallActions.detachKeys()
+        }
+    }
+
+    private var wallContent: some View {
         let items = wall.items
-        VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 12) {
             if !wall.screenOK || !wall.axOK {
                 HStack(spacing: 14) { PermissionWarnings(); Spacer() }
             }
@@ -159,28 +189,12 @@ struct WallView: View {
             } else {
                 WallGrid(items: items)
             }
-            Text("↩ 跳转 · 1–9 快速跳转 · 方向键选择 · ⌘E 编辑备注（或点备注） · ⌘D 取消监控 · esc 隐藏")
+            Text("↩ 跳转 · 1–9 快速跳转 · 方向键选择 · ⌘E 编辑备注（或点备注） · ⌘D 取消监控 · ⌘N 记待办 · esc 隐藏")
                 .font(.caption).foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button { WallActions.manage() } label: { Label("管理监控", systemImage: "checklist") }
-                    .help("勾选要监控的窗口、编辑备注")
-            }
-        }
-        .onAppear {
-            wall.editing = nil
-            if wall.selection == nil { wall.selection = items.first?.id }
-            wall.startLive()
-            WallActions.attachKeys()
-        }
-        .onDisappear {
-            wall.stopLive()
-            WallActions.detachKeys()
-        }
     }
 }
 
@@ -418,7 +432,9 @@ final class NotePrompt: NSObject, NSWindowDelegate {
     private var model = NoteModel()
 
     /// 标记成功后弹出，回车保存、esc 跳过，然后把焦点还给原窗口
-    func ask(title: String, onSave: @escaping (String) -> Void) {
+    func ask(title: String, icon: String = "eye",
+             placeholder: String = "备注（可选）：这个窗口在等什么 / 回来要做什么",
+             hint: String? = nil, onSave: @escaping (String) -> Void) {
         finish(save: true, restore: false)   // 上一个还开着就先按保存处理
         let p = panel ?? {
             let p = makePanel(level: .modalPanel)
@@ -430,6 +446,9 @@ final class NotePrompt: NSObject, NSWindowDelegate {
         prev = previousApp()
         self.onSave = onSave
         model.title = title
+        model.icon = icon
+        model.placeholder = placeholder
+        model.hint = hint ?? "↩ 保存 · esc 跳过 · 之后可在窗口墙里点备注修改"
         model.text = ""
         model.token += 1
         let w: CGFloat = 520, h: CGFloat = 112
@@ -456,6 +475,9 @@ final class NotePrompt: NSObject, NSWindowDelegate {
 @Observable
 final class NoteModel {
     var title = ""
+    var icon = "eye"
+    var placeholder = ""
+    var hint = ""
     var text = ""
     var token = 0
 }
@@ -466,14 +488,14 @@ private struct NotePromptView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(model.title, systemImage: "eye").font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-            TextField("备注（可选）：这个窗口在等什么 / 回来要做什么", text: $model.text)
+            Label(model.title, systemImage: model.icon).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+            TextField(model.placeholder, text: $model.text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 14))
                 .focused($focused)
                 .onSubmit { NotePrompt.shared.finish(save: true) }
                 .onExitCommand { NotePrompt.shared.finish(save: false) }
-            Text("↩ 保存 · esc 跳过 · 之后可在窗口墙（\(HotKeys.shared.display(.wall))）里点备注修改")
+            Text(model.hint)
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .padding(16)

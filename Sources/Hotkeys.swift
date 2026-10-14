@@ -5,7 +5,7 @@ import SwiftUI
 // MARK: - 全局快捷键
 
 enum HotKeyAction: String, CaseIterable, Identifiable {
-    case wall, markWindow, markApp
+    case wall, markWindow, markApp, quickMemo
     var id: String { rawValue }
 
     var name: String {
@@ -13,6 +13,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .wall: "呼出 / 隐藏 Procman"
         case .markWindow: "标记 / 取消当前窗口"
         case .markApp: "标记 / 取消当前 app"
+        case .quickMemo: "快速记一条待办"
         }
     }
 
@@ -21,6 +22,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .wall: Combo(key: kVK_ANSI_W, mods: controlKey | optionKey, char: "W")
         case .markWindow: Combo(key: kVK_ANSI_M, mods: controlKey | optionKey, char: "M")
         case .markApp: Combo(key: kVK_ANSI_M, mods: controlKey | optionKey | shiftKey, char: "M")
+        case .quickMemo: Combo(key: kVK_ANSI_N, mods: controlKey | optionKey, char: "N")
         }
     }
 
@@ -29,6 +31,9 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .wall: WallActions.toggle()
         case .markWindow: Wall.shared.toggleFrontmostWindow()
         case .markApp: Wall.shared.toggleFrontmostApp()
+        case .quickMemo:
+            NotePrompt.shared.ask(title: "记一条待办", icon: "checklist", placeholder: "准备要做的事…",
+                                  hint: "↩ 保存 · esc 取消 · 在窗口墙右侧的待办栏里查看") { Memos.shared.add($0) }
         }
     }
 }
