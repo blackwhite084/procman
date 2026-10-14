@@ -22,6 +22,8 @@ struct MainView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button { openWindow(id: "windows") } label: { Label("窗口监控", systemImage: "square.grid.2x2") }
+                    .help("管理窗口墙里的监控窗口（窗口墙全局快捷键 \(HotKeys.wall.display)）")
                 Button { openWindow(id: "ports") } label: { Label("端口占用", systemImage: "network") }
                     .help("查看所有正在监听的端口 ⇧⌘P")
                     .keyboardShortcut("p", modifiers: [.command, .shift])
@@ -439,6 +441,9 @@ struct MenuContent: View {
         Divider()
         Button("打开 Procman") { store.openMain?() }.keyboardShortcut("o")
         Button("端口占用…") { store.openPorts?() }
+        Divider()
+        Button("窗口墙  \(HotKeys.wall.display)") { WallWindow.shared.show() }
+        Button("管理监控窗口…") { store.openWindows?() }
         Toggle("登录时启动", isOn: Binding(get: { store.loginItem }, set: { store.setLoginItem($0) }))
         Divider()
         Button("退出（服务保持运行）") { NSApp.terminate(nil) }.keyboardShortcut("q")
@@ -457,6 +462,11 @@ struct MenuLabel: View {
                 store.openPorts = {
                     NSApp.setActivationPolicy(.regular)
                     openWindow(id: "ports")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                store.openWindows = {
+                    NSApp.setActivationPolicy(.regular)
+                    openWindow(id: "windows")
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 store.openMain = {

@@ -27,6 +27,12 @@ struct ProcmanApp: App {
         .defaultSize(width: 900, height: 520)
         .defaultLaunchBehavior(.suppressed)
 
+        Window("窗口监控", id: "windows") {
+            WindowsView().environment(Wall.shared)
+        }
+        .defaultSize(width: 720, height: 640)
+        .defaultLaunchBehavior(.suppressed)
+
         MenuBarExtra {
             MenuContent().environment(store)
         } label: {
@@ -39,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(Store.background ? .accessory : .regular)
         NSApp.applicationIconImage = appIcon(size: 512)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated { Wall.shared.hotkeyFailed = HotKeys.setup() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

@@ -80,6 +80,7 @@ final class Store {
 
     @ObservationIgnored var openMain: (() -> Void)?
     @ObservationIgnored var openPorts: (() -> Void)?
+    @ObservationIgnored var openWindows: (() -> Void)?
     @ObservationIgnored private var ownerScanned: [Int: Date] = [:]
     @ObservationIgnored private var portCheckBusy = false
     @ObservationIgnored private var probes: [String: (WebPort, Date)] = [:]  // "pgid:port" -> HTTP 探测结果
