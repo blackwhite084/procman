@@ -171,7 +171,7 @@ struct WallView: View {
                 ContentUnavailableView {
                     Label("还没有监控的窗口", systemImage: "rectangle.on.rectangle.slash")
                 } description: {
-                    Text("切到想盯的窗口按 \(HotKeys.markWindow.display)，整个 app 按 \(HotKeys.markApp.display)，\n或者在「管理」里勾选。")
+                    Text("切到想盯的窗口按 \(HotKeys.shared.display(.markWindow))，整个 app 按 \(HotKeys.shared.display(.markApp))，\n或者在「管理」里勾选。")
                 } actions: {
                     Button("打开管理") { WallWindow.shared.manage() }
                 }
@@ -479,7 +479,7 @@ private struct NotePromptView: View {
                 .focused($focused)
                 .onSubmit { NotePrompt.shared.finish(save: true) }
                 .onExitCommand { NotePrompt.shared.finish(save: false) }
-            Text("↩ 保存 · esc 跳过 · 之后可在窗口墙（\(HotKeys.wall.display)）里点备注修改")
+            Text("↩ 保存 · esc 跳过 · 之后可在窗口墙（\(HotKeys.shared.display(.wall))）里点备注修改")
                 .font(.caption).foregroundStyle(.tertiary)
         }
         .padding(16)
@@ -574,7 +574,7 @@ struct WindowsView: View {
                 Toggle(isOn: $thumbsOn) { Label("实时缩略图", systemImage: "photo") }
                     .help("关掉则窗口墙只显示 app 图标")
                 Button { WallWindow.shared.show() } label: { Label("打开窗口墙", systemImage: "square.grid.2x2") }
-                    .help("打开窗口墙 \(HotKeys.wall.display)")
+                    .help("打开窗口墙 \(HotKeys.shared.display(.wall))")
             }
         }
         .task {
@@ -644,16 +644,8 @@ private struct SetupRows: View {
     @Environment(Wall.self) private var wall
 
     var body: some View {
-        ForEach(HotKeys.all, id: \.display) { d in
-            LabeledContent(d.name) {
-                HStack(spacing: 8) {
-                    if wall.hotkeyFailed.contains(d.display) {
-                        Text("注册失败，可能被其他 app 占用").font(.caption).foregroundStyle(.red)
-                    }
-                    Text(d.display).font(.body.monospaced()).padding(.horizontal, 6)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
-                }
-            }
+        ForEach(HotKeyAction.allCases) { a in
+            LabeledContent(a.name) { HotKeyRecorder(action: a) }
         }
         LabeledContent("屏幕录制（缩略图、窗口标题）") {
             permission(wall.screenOK, Permission.requestScreen)

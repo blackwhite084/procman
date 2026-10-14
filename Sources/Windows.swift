@@ -204,7 +204,6 @@ final class Wall {
     var thumbs: [CGWindowID: NSImage] = [:]
     var selection: CGWindowID?
     var editing: CGWindowID?          // 窗口墙里正在编辑备注的那一格
-    var hotkeyFailed: [String] = []
     var screenOK = Permission.screen
     var axOK = Permission.accessibility
 
@@ -348,7 +347,7 @@ final class Wall {
     func toggleFrontmostWindow() {
         guard let w = frontmostWindow() else { HUD.show("没找到当前窗口", icon: "questionmark.circle"); return }
         if via(w) == .app {
-            HUD.show("整个 \(w.app) 已在监控中（⌃⌥⇧M 取消）", icon: "eye")
+            HUD.show("整个 \(w.app) 已在监控中（\(HotKeys.shared.display(.markApp)) 取消）", icon: "eye")
             return
         }
         let what = "\(w.app)\(w.title.isEmpty ? "" : " — \(w.title)")"
