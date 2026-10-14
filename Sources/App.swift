@@ -19,7 +19,14 @@ struct ProcmanApp: App {
         }
         .defaultSize(width: 1040, height: 680)
         .defaultLaunchBehavior(.suppressed)
-        .commands { CommandGroup(replacing: .newItem) {} }
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+            CommandGroup(before: .toolbar) {
+                Button("窗口墙") { Store.shared.tab = .wall }.keyboardShortcut("1")
+                Button("服务") { Store.shared.tab = .services }.keyboardShortcut("2")
+                Divider()
+            }
+        }
 
         Window("端口占用", id: "ports") {
             PortsView().environment(store)
@@ -32,6 +39,10 @@ struct ProcmanApp: App {
         }
         .defaultSize(width: 720, height: 640)
         .defaultLaunchBehavior(.suppressed)
+
+        Settings {
+            SettingsView().environment(store).environment(Wall.shared)
+        }
 
         MenuBarExtra {
             MenuContent().environment(store)

@@ -385,7 +385,9 @@ final class Wall {
             while !Task.isCancelled {
                 refresh()
                 let ids = Set(monitored.map(\.id))
-                if UserDefaults.standard.object(forKey: "wallThumbs") as? Bool ?? true, screenOK {
+                // Procman 被隐藏或窗口被完全挡住时不截图
+                let shown = NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) }
+                if shown, UserDefaults.standard.object(forKey: "wallThumbs") as? Bool ?? true, screenOK {
                     let shots = await capture(ids, maxEdge: 900)
                     if Task.isCancelled { break }
                     for (id, img) in shots { thumbs[id] = img }

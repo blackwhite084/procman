@@ -50,6 +50,8 @@ struct Conflict: Identifiable {
 
 private struct SavedRun: Codable { var pid: Int32; var started: Date; var startTime: Double? }
 
+enum MainTab: String { case wall, services }
+
 enum Status {
     case stopped, running, stopping, exited(Int32?), crashed(Int32)
     var color: NSColor {
@@ -76,6 +78,7 @@ final class Store {
     var conflict: Conflict?
     var pendingNew: Service?                // 从端口窗口「添加为服务」
     var loginItem = false
+    var tab = MainTab.wall                  // 主窗口当前页，每次重新打开都回到窗口墙
     var lastError: String?
 
     @ObservationIgnored var openMain: (() -> Void)?
@@ -268,6 +271,7 @@ final class Store {
             let owners = listListeners(port: p)
             portOwners[p] = owners
             conflict = Conflict(serviceID: id, port: p, owners: owners)
+            tab = .services
             openMain?()
             return
         }

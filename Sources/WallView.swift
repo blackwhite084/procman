@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-// MARK: - 浮动面板
+// MARK: - 浮动面板（标记时的备注输入框用）
 
 /// 无边框面板默认不能成为 key window，收不到键盘
 final class KeyPanel: NSPanel {
@@ -29,92 +29,70 @@ private func previousApp() -> NSRunningApplication? {
     return a?.processIdentifier == getpid() ? nil : a
 }
 
-// MARK: - 窗口墙
+// MARK: - 窗口墙（主窗口的默认页）
+
+/// 主窗口的 SwiftUI Window id 是 "main"，系统生成的 NSWindow.identifier 以它开头
+func isMainWindow(_ w: NSWindow?) -> Bool { w?.identifier?.rawValue.hasPrefix("main") ?? false }
 
 @MainActor
-final class WallWindow: NSObject, NSWindowDelegate {
-    static let shared = WallWindow()
-    private var panel: KeyPanel?
-    private var prev: NSRunningApplication?
-    private var monitor: Any?
-    var isVisible: Bool { panel?.isVisible ?? false }
+enum WallActions {
+    private static var monitor: Any?
 
-    func toggle() { isVisible ? hide(restore: true) : show() }
-
-    func show() {
-        let p = panel ?? {
-            let p = makePanel(level: .floating)
-            p.delegate = self
-            p.contentView = NSHostingView(rootView: WallView().environment(Wall.shared))
-            panel = p
-            return p
-        }()
-        if !isVisible { prev = previousApp() }
-        if let vf = mouseScreen()?.visibleFrame {
-            let w = vf.width * 0.8, h = vf.height * 0.82
-            p.setFrame(NSRect(x: vf.midX - w / 2, y: vf.midY - h / 2, width: w, height: h), display: false)
-        }
-        let wall = Wall.shared
-        wall.refresh()
-        wall.editing = nil
-        wall.selection = wall.items.first?.id
-        wall.startLive()
-        NSApp.activate(ignoringOtherApps: true)
-        p.makeKeyAndOrderFront(nil)
-        if monitor == nil {
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
-                MainActor.assumeIsolated { WallWindow.shared.key(e) ? nil : e }
-            }
+    /// 全局快捷键：Procman 不在前台就呼出窗口墙，已经在看窗口墙就隐藏（焦点还给之前的 app）
+    static func toggle() {
+        let st = Store.shared
+        if NSApp.isActive, st.tab == .wall, NSApp.windows.contains(where: { isMainWindow($0) && $0.isKeyWindow }) {
+            NSApp.hide(nil)
+        } else {
+            st.tab = .wall
+            st.openMain?()
         }
     }
 
-    func hide(restore: Bool) {
-        guard let p = panel, p.isVisible else { return }
-        Wall.shared.stopLive()
-        Wall.shared.editing = nil
-        p.orderOut(nil)
-        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
-        if restore { prev?.activate() }
-        prev = nil
-    }
-
-    func jump(_ w: WinInfo) {
-        hide(restore: false)
+    static func jump(_ w: WinInfo) {
         if let msg = focusWindow(w) { HUD.show(msg, icon: "exclamationmark.triangle.fill") }
     }
 
-    func manage() {
-        hide(restore: false)
-        Store.shared.openWindows?()
+    static func manage() { Store.shared.openWindows?() }
+
+    static func attachKeys() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            MainActor.assumeIsolated { key(e) ? nil : e }
+        }
     }
 
-    func windowDidResignKey(_ notification: Notification) { hide(restore: false) }
+    static func detachKeys() {
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+    }
 
     /// 返回 true 表示按键已处理
-    private func key(_ e: NSEvent) -> Bool {
-        guard e.window === panel else { return false }
+    private static func key(_ e: NSEvent) -> Bool {
         let wall = Wall.shared
-        if wall.editing != nil { return false }   // 正在编辑备注，键盘交给输入框
+        // 只管主窗口的窗口墙页；有输入框在打字（编辑备注、搜索）时键盘交给它
+        guard isMainWindow(e.window), Store.shared.tab == .wall, wall.editing == nil,
+              !(e.window?.firstResponder is NSText) else { return false }
         let items = wall.items
-        let cmd = e.modifierFlags.contains(.command)
+        let mods = e.modifierFlags.intersection([.command, .option, .control])
+        let cmd = mods == .command
+        guard mods.isEmpty || cmd else { return false }
         let i = items.firstIndex { $0.id == wall.selection }
         let cols = Wall.columns(items.count)
         func move(_ d: Int) {
             guard !items.isEmpty else { return }
-            wall.selection = items[min(max((i ?? 0) + d, 0), items.count - 1)].id
+            wall.selection = items[min(max((i ?? -1) + d, 0), items.count - 1)].id
         }
         switch Int(e.keyCode) {
-        case 53: hide(restore: true)
-        case 36, 76: if let i, case .live(let w) = items[i] { jump(w) }
-        case 123: move(-1)
-        case 124: move(1)
-        case 125: move(cols)
-        case 126: move(-cols)
+        case 53 where !cmd: NSApp.hide(nil)
+        case 36 where !cmd, 76 where !cmd: if let i, case .live(let w) = items[i] { jump(w) }
+        case 123 where !cmd: move(-1)
+        case 124 where !cmd: move(1)
+        case 125 where !cmd: move(cols)
+        case 126 where !cmd: move(-cols)
         default:
             let ch = e.charactersIgnoringModifiers?.lowercased() ?? ""
             if cmd, ch == "d", let i { wall.remove(items[i]); wall.selection = wall.items[safe: i]?.id ?? wall.items.last?.id }
             else if cmd, ch == "e", let i { wall.editing = items[i].id }
-            else if cmd, ch == "," { manage() }
             else if !cmd, let n = Int(ch), n >= 1, n <= min(9, items.count), case .live(let w) = items[n - 1] { jump(w) }
             else { return false }
         }
@@ -158,35 +136,44 @@ struct WallView: View {
 
     var body: some View {
         let items = wall.items
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Text("窗口墙").font(.title2.weight(.semibold))
-                Text("\(wall.monitored.count) 个窗口").foregroundStyle(.secondary)
-                Spacer()
-                PermissionWarnings()
-                Button { WallWindow.shared.manage() } label: { Label("管理", systemImage: "slider.horizontal.3") }
-                    .help("管理监控窗口 ⌘,")
+        VStack(alignment: .leading, spacing: 12) {
+            if !wall.screenOK || !wall.axOK {
+                HStack(spacing: 14) { PermissionWarnings(); Spacer() }
             }
             if items.isEmpty {
                 ContentUnavailableView {
                     Label("还没有监控的窗口", systemImage: "rectangle.on.rectangle.slash")
                 } description: {
-                    Text("切到想盯的窗口按 \(HotKeys.shared.display(.markWindow))，整个 app 按 \(HotKeys.shared.display(.markApp))，\n或者在「管理」里勾选。")
+                    Text("切到想盯的窗口按 \(HotKeys.shared.display(.markWindow))，整个 app 按 \(HotKeys.shared.display(.markApp))，\n或者在「管理监控」里勾选。")
                 } actions: {
-                    Button("打开管理") { WallWindow.shared.manage() }
+                    Button("管理监控") { WallActions.manage() }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 WallGrid(items: items)
             }
-            Text("↩ 跳转 · 1–9 快速跳转 · 方向键选择 · ⌘E 编辑备注（或点备注） · ⌘D 取消监控 · esc 关闭")
+            Text("↩ 跳转 · 1–9 快速跳转 · 方向键选择 · ⌘E 编辑备注（或点备注） · ⌘D 取消监控 · esc 隐藏")
                 .font(.caption).foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity)
         }
-        .padding(20)
+        .padding(.horizontal, 18).padding(.top, 12).padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.08)))
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { WallActions.manage() } label: { Label("管理监控", systemImage: "checklist") }
+                    .help("勾选要监控的窗口、编辑备注")
+            }
+        }
+        .onAppear {
+            wall.editing = nil
+            if wall.selection == nil { wall.selection = items.first?.id }
+            wall.startLive()
+            WallActions.attachKeys()
+        }
+        .onDisappear {
+            wall.stopLive()
+            WallActions.detachKeys()
+        }
     }
 }
 
@@ -198,7 +185,7 @@ private struct PermissionWarnings: View {
                 Label("缺屏幕录制权限，只显示图标", systemImage: "exclamationmark.triangle.fill")
             }
             .buttonStyle(.borderless).foregroundStyle(.orange)
-            .help("系统设置 → 隐私与安全性 → 录屏与系统录音，勾上 Procman，然后在管理窗口点「重启 Procman」")
+            .help("系统设置 → 隐私与安全性 → 录屏与系统录音，勾上 Procman，然后在设置里点「重启 Procman」")
         }
         if !wall.axOK {
             Button { Permission.requestAccessibility() } label: {
@@ -265,7 +252,7 @@ private struct WallTile: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(selected ? Color.accentColor.opacity(0.8) : .clear, lineWidth: 2))
         .contentShape(RoundedRectangle(cornerRadius: 14))
         .onHover { hover = $0; if $0 && wall.editing == nil { wall.selection = item.id } }
-        .onTapGesture { if case .live(let w) = item { WallWindow.shared.jump(w) } }
+        .onTapGesture { if case .live(let w) = item { WallActions.jump(w) } }
         .contextMenu { menu }
         .opacity(isClosed ? 0.75 : 1)
     }
@@ -315,7 +302,7 @@ private struct WallTile: View {
 
     @ViewBuilder private var menu: some View {
         if case .live(let w) = item {
-            Button("跳转") { WallWindow.shared.jump(w) }
+            Button("跳转") { WallActions.jump(w) }
             Divider()
         }
         Button("编辑备注") { wall.editing = item.id }
@@ -494,7 +481,6 @@ private struct NotePromptView: View {
 
 struct WindowsView: View {
     @Environment(Wall.self) private var wall
-    @AppStorage("wallThumbs") private var thumbsOn = true
     @State private var query = ""
 
     private struct Group: Identifiable {
@@ -524,8 +510,6 @@ struct WindowsView: View {
 
     var body: some View {
         List {
-            Section("快捷键与权限") { SetupRows() }
-
             if !wall.stale.isEmpty {
                 Section {
                     ForEach(wall.stale, id: \.id) { m in
@@ -571,10 +555,8 @@ struct WindowsView: View {
         .searchable(text: $query, placement: .toolbar, prompt: "app / 窗口标题 / 备注")
         .toolbar {
             ToolbarItemGroup {
-                Toggle(isOn: $thumbsOn) { Label("实时缩略图", systemImage: "photo") }
-                    .help("关掉则窗口墙只显示 app 图标")
-                Button { WallWindow.shared.show() } label: { Label("打开窗口墙", systemImage: "square.grid.2x2") }
-                    .help("打开窗口墙 \(HotKeys.shared.display(.wall))")
+                Button { WallActions.toggle() } label: { Label("回到窗口墙", systemImage: "square.grid.2x2") }
+                    .help("回到窗口墙")
             }
         }
         .task {
@@ -640,27 +622,47 @@ private struct NoteField: View {
     }
 }
 
-private struct SetupRows: View {
+// MARK: - 设置
+
+struct SettingsView: View {
+    @Environment(Store.self) private var store
     @Environment(Wall.self) private var wall
+    @AppStorage("wallThumbs") private var thumbsOn = true
 
     var body: some View {
-        ForEach(HotKeyAction.allCases) { a in
-            LabeledContent(a.name) { HotKeyRecorder(action: a) }
-        }
-        LabeledContent("屏幕录制（缩略图、窗口标题）") {
-            permission(wall.screenOK, Permission.requestScreen)
-        }
-        LabeledContent("辅助功能（精确跳到指定窗口）") {
-            permission(wall.axOK, Permission.requestAccessibility)
-        }
-        if !wall.screenOK || !wall.axOK {
-            HStack {
-                Text("在系统设置里勾上 Procman 后需要重启 Procman 才生效（服务不受影响）")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("重启 Procman") { relaunch() }
+        Form {
+            Section {
+                Toggle("登录时启动 Procman", isOn: Binding(get: { store.loginItem }, set: { store.setLoginItem($0) }))
+                Text("开机登录后在后台运行，并拉起勾选了「自动启动」的服务").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("窗口墙") {
+                Toggle("实时缩略图", isOn: $thumbsOn)
+                Text("关掉则只显示 app 图标，也不需要「屏幕录制」权限").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("全局快捷键") {
+                ForEach(HotKeyAction.allCases) { a in
+                    LabeledContent(a.name) { HotKeyRecorder(action: a) }
+                }
+                Text("点击快捷键后按下新组合；esc 取消，delete 清除").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("权限") {
+                LabeledContent("屏幕录制（缩略图、窗口标题）") { permission(wall.screenOK, Permission.requestScreen) }
+                LabeledContent("辅助功能（精确跳到指定窗口）") { permission(wall.axOK, Permission.requestAccessibility) }
+                if !wall.screenOK || !wall.axOK {
+                    HStack {
+                        Text("在系统设置里勾上 Procman 后要重启 Procman 才生效（服务不受影响）")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("重启 Procman") { relaunch() }
+                    }
+                }
             }
         }
+        .formStyle(.grouped)
+        .frame(width: 500)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear { wall.refresh(); NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true) }
+        .onDisappear(perform: updateActivationPolicy)
     }
 
     @ViewBuilder func permission(_ ok: Bool, _ request: @escaping () -> Void) -> some View {

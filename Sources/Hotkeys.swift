@@ -10,7 +10,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
 
     var name: String {
         switch self {
-        case .wall: "打开窗口墙"
+        case .wall: "呼出 / 隐藏 Procman"
         case .markWindow: "标记 / 取消当前窗口"
         case .markApp: "标记 / 取消当前 app"
         }
@@ -26,7 +26,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
 
     @MainActor func perform() {
         switch self {
-        case .wall: WallWindow.shared.toggle()
+        case .wall: WallActions.toggle()
         case .markWindow: Wall.shared.toggleFrontmostWindow()
         case .markApp: Wall.shared.toggleFrontmostApp()
         }

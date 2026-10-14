@@ -5,42 +5,27 @@ import SwiftUI
 
 struct MainView: View {
     @Environment(Store.self) private var store
-    @Environment(\.openWindow) private var openWindow
-    @AppStorage("selected") private var selected: String?
-    @State private var editing: Service?
 
     var body: some View {
-        NavigationSplitView {
-            Sidebar(selected: $selected, editing: $editing)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
-        } detail: {
-            if let id = selected, let s = store.service(id) {
-                DetailView(service: s, editing: $editing).id(s.id)
-            } else {
-                EmptyState(editing: $editing)
+        @Bindable var store = store
+        Group {
+            switch store.tab {
+            case .wall: WallView().environment(Wall.shared)
+            case .services: ServicesView()
             }
         }
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button { openWindow(id: "windows") } label: { Label("窗口监控", systemImage: "square.grid.2x2") }
-                    .help("管理窗口墙里的监控窗口（窗口墙全局快捷键 \(HotKeys.shared.display(.wall))）")
-                Button { openWindow(id: "ports") } label: { Label("端口占用", systemImage: "network") }
-                    .help("查看所有正在监听的端口 ⇧⌘P")
-                    .keyboardShortcut("p", modifiers: [.command, .shift])
-                Button { editing = Service() } label: { Label("新建", systemImage: "plus") }
-                    .help("新建服务 ⌘N")
-                    .keyboardShortcut("n")
+            ToolbarItem(placement: .principal) {
+                Picker("", selection: $store.tab) {
+                    Label("窗口墙", systemImage: "square.grid.2x2").tag(MainTab.wall)
+                    Label("服务", systemImage: "shippingbox").tag(MainTab.services)
+                }
+                .pickerStyle(.segmented)
+                .labelStyle(.titleAndIcon)
+                .help("⌘1 窗口墙 · ⌘2 服务")
             }
         }
-        .sheet(item: $editing) { s in
-            EditSheet(draft: s, isNew: store.service(s.id) == nil) { saved in
-                store.upsert(saved)
-                selected = saved.id
-            }
-        }
-        .onChange(of: store.pendingNew) { _, s in
-            if let s { editing = s; store.pendingNew = nil }
-        }
+        .onChange(of: store.pendingNew) { _, s in if s != nil { store.tab = .services } }
         .alert("端口 \(store.conflict?.port ?? 0) 已被占用", isPresented: Binding(
             get: { store.conflict != nil }, set: { if !$0 { store.conflict = nil } }), presenting: store.conflict) { c in
             if !c.owners.isEmpty {
@@ -61,7 +46,49 @@ struct MainView: View {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
         }
-        .onDisappear(perform: updateActivationPolicy)
+        .onDisappear {
+            store.tab = .wall
+            updateActivationPolicy()
+        }
+    }
+}
+
+struct ServicesView: View {
+    @Environment(Store.self) private var store
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("selected") private var selected: String?
+    @State private var editing: Service?
+
+    var body: some View {
+        NavigationSplitView {
+            Sidebar(selected: $selected, editing: $editing)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+        } detail: {
+            if let id = selected, let s = store.service(id) {
+                DetailView(service: s, editing: $editing).id(s.id)
+            } else {
+                EmptyState(editing: $editing)
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { openWindow(id: "ports") } label: { Label("端口占用", systemImage: "network") }
+                    .help("查看所有正在监听的端口 ⇧⌘P")
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Button { editing = Service() } label: { Label("新建", systemImage: "plus") }
+                    .help("新建服务 ⌘N")
+                    .keyboardShortcut("n")
+            }
+        }
+        .sheet(item: $editing) { s in
+            EditSheet(draft: s, isNew: store.service(s.id) == nil) { saved in
+                store.upsert(saved)
+                selected = saved.id
+            }
+        }
+        .onChange(of: store.pendingNew, initial: true) { _, s in
+            if let s { editing = s; store.pendingNew = nil }
+        }
     }
 }
 
@@ -100,14 +127,6 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            Toggle(isOn: Binding(get: { store.loginItem }, set: { store.setLoginItem($0) })) {
-                Label("登录时启动 Procman", systemImage: "power").font(.callout)
-            }
-            .toggleStyle(.switch).controlSize(.mini)
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .help("开机登录后自动在后台运行，并拉起勾选了「自动启动」的服务")
-        }
         .confirmationDialog("删除「\(confirmDelete?.name ?? "")」？", isPresented: Binding(
             get: { confirmDelete != nil }, set: { if !$0 { confirmDelete = nil } })) {
             Button("删除", role: .destructive) {
@@ -435,16 +454,19 @@ struct MenuContent: View {
                     Button("在浏览器打开") { NSWorkspace.shared.open(URL(string: url)!) }
                 }
                 Divider()
-                Button("查看输出…") { UserDefaults.standard.set(s.id, forKey: "selected"); store.openMain?() }
+                Button("查看输出…") {
+                    UserDefaults.standard.set(s.id, forKey: "selected")
+                    store.tab = .services
+                    store.openMain?()
+                }
             }
         }
         Divider()
-        Button("打开 Procman") { store.openMain?() }.keyboardShortcut("o")
+        Button("窗口墙") { store.tab = .wall; store.openMain?() }.keyboardShortcut("o")
+        Button("服务") { store.tab = .services; store.openMain?() }
         Button("端口占用…") { store.openPorts?() }
-        Divider()
-        Button("窗口墙  \(HotKeys.shared.display(.wall))") { WallWindow.shared.show() }
         Button("管理监控窗口…") { store.openWindows?() }
-        Toggle("登录时启动", isOn: Binding(get: { store.loginItem }, set: { store.setLoginItem($0) }))
+        SettingsLink { Text("设置…") }.keyboardShortcut(",")
         Divider()
         Button("退出（服务保持运行）") { NSApp.terminate(nil) }.keyboardShortcut("q")
         Button("停止全部服务并退出") { store.stopAllAndQuit() }
