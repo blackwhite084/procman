@@ -39,8 +39,10 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 EOF
 # ad-hoc 签名每次编译 cdhash 都会变，系统就把它当成新 app，「屏幕录制 / 辅助功能」授权随之失效。
 # 有固定证书（bash make-cert.sh 生成一次）就用它签，重新编译后授权保留
-if security find-identity -p codesigning | grep -q '"Procman Dev"'; then
-    codesign --force --sign "Procman Dev" "$APP"
+KC="$HOME/Library/Keychains/procman-dev.keychain-db"
+if [ -f "$KC" ] && security find-identity -p codesigning "$KC" | grep -q '"Procman Dev"'; then
+    security unlock-keychain -p procman "$KC"
+    codesign --force --sign "Procman Dev" --keychain "$KC" "$APP"
 else
     codesign --force --sign - "$APP" >/dev/null 2>&1
     echo "提示：未找到「Procman Dev」证书，使用 ad-hoc 签名，重新编译后需重新授权屏幕录制 / 辅助功能（bash make-cert.sh 可解决）"
