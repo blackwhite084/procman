@@ -45,6 +45,7 @@ struct MainView: View {
         .onAppear {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async(execute: applySpaces)   // 这时 NSWindow 可能还没挂上
         }
         .onDisappear {
             store.tab = .wall

@@ -34,6 +34,13 @@ private func previousApp() -> NSRunningApplication? {
 /// 主窗口的 SwiftUI Window id 是 "main"，系统生成的 NSWindow.identifier 以它开头
 func isMainWindow(_ w: NSWindow?) -> Bool { w?.identifier?.rawValue.hasPrefix("main") ?? false }
 
+/// 按设置让主窗口出现在所有桌面（Space）上
+@MainActor func applySpaces() {
+    for w in NSApp.windows where isMainWindow(w) {
+        if Prefs.allSpaces { w.collectionBehavior.insert(.canJoinAllSpaces) } else { w.collectionBehavior.remove(.canJoinAllSpaces) }
+    }
+}
+
 @MainActor
 enum WallActions {
     private static var monitor: Any?
@@ -628,6 +635,8 @@ struct SettingsView: View {
     @Environment(Store.self) private var store
     @Environment(Wall.self) private var wall
     @AppStorage("wallThumbs") private var thumbsOn = true
+    @AppStorage("wallInterval") private var interval = 2.0
+    @AppStorage("allSpaces") private var allSpaces = true
 
     var body: some View {
         Form {
@@ -638,6 +647,14 @@ struct SettingsView: View {
             Section("窗口墙") {
                 Toggle("实时缩略图", isOn: $thumbsOn)
                 Text("关掉则只显示 app 图标，也不需要「屏幕录制」权限").font(.caption).foregroundStyle(.secondary)
+                Picker("缩略图刷新间隔", selection: $interval) {
+                    ForEach([1.0, 2, 5, 10], id: \.self) { Text("\(Int($0)) 秒").tag($0) }
+                }
+                .disabled(!thumbsOn)
+                Toggle("主窗口出现在所有桌面", isOn: $allSpaces)
+                    .onChange(of: allSpaces) { applySpaces() }
+                Text("切换桌面（Space）时 Procman 主窗口跟着过去。注意：其他桌面上的窗口系统通常不重绘，缩略图会停在你最后一次看到它时的样子")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("全局快捷键") {
                 ForEach(HotKeyAction.allCases) { a in

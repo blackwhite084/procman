@@ -71,32 +71,92 @@ private func axFrame(_ e: AXUIElement) -> CGRect? {
     return CGRect(origin: p, size: s)
 }
 
-/// 跳到指定窗口。匹配顺序：窗口 ID → 几何位置（容差 6 点）→ 该 app 只有一个窗口；
-/// 都没命中就只激活 app。成功返回 nil，否则返回给用户看的原因
+struct AXMatch {
+    var error: AXError = .success
+    var windows: [AXUIElement] = []
+    var target: AXUIElement?
+    var by = "none"
+}
+
+/// 在 app 的 AX 窗口里找到对应 CGWindowID 的那个。匹配顺序：窗口 ID → 几何位置（容差 6 点）→ 该 app 只有一个窗口。
+/// AX 只列出当前桌面空间的窗口，所以后两种兜底只对当前空间的窗口做，否则会匹配到同 app 的别的窗口
+func axMatch(_ w: WinInfo) -> AXMatch {
+    var m = AXMatch()
+    var raw: CFTypeRef?
+    m.error = AXUIElementCopyAttributeValue(AXUIElementCreateApplication(w.pid), kAXWindowsAttribute as CFString, &raw)
+    guard m.error == .success, let wins = raw as? [AXUIElement] else { return m }
+    m.windows = wins
+    let near = { (r: CGRect) in
+        abs(r.minX - w.bounds.minX) <= 6 && abs(r.minY - w.bounds.minY) <= 6
+            && abs(r.width - w.bounds.width) <= 6 && abs(r.height - w.bounds.height) <= 6
+    }
+    if let t = wins.first(where: { axWindowID($0) == w.id }) { m.target = t; m.by = "windowID" }
+    else if w.onScreen, let t = wins.first(where: { axFrame($0).map(near) ?? false }) { m.target = t; m.by = "geometry" }
+    else if w.onScreen, wins.count == 1 { m.target = wins[0]; m.by = "only-window" }
+    return m
+}
+
+func axDescribe(_ e: AXUIElement) -> String {
+    let f = axFrame(e).map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))×\(Int($0.height))" } ?? "?"
+    return "id=\(axWindowID(e).map(String.init) ?? "?") frame=\(f)"
+}
+
+// MARK: 跨桌面空间跳转（SkyLight 私有 API，AltTab 同款）
+//
+// AX 拿不到其他桌面空间的窗口，所以只靠 AX 的话跨空间只能切到 app。
+// _SLPSSetFrontProcessWithOptions 按窗口 ID 把那个窗口所在的进程提到最前，系统会自己切到它的空间；
+// 再补两条「让它成为 key window」的事件记录。运行时 dlsym 取符号，取不到就退回 AX
+
+private typealias SetFrontFn = @convention(c) (UnsafeMutableRawPointer, CGWindowID, UInt32) -> Int32
+private typealias PostEventFn = @convention(c) (UnsafeMutableRawPointer, UnsafeMutablePointer<UInt8>) -> Int32
+private typealias PSNForPIDFn = @convention(c) (pid_t, UnsafeMutableRawPointer) -> Int32
+
+private let skylight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+private let slpsSetFront = dlsym(skylight, "_SLPSSetFrontProcessWithOptions").map { unsafeBitCast($0, to: SetFrontFn.self) }
+private let slpsPostEvent = dlsym(skylight, "SLPSPostEventRecordTo").map { unsafeBitCast($0, to: PostEventFn.self) }
+private let psnForPID = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID").map { unsafeBitCast($0, to: PSNForPIDFn.self) }
+
+var skylightAvailable: Bool { slpsSetFront != nil && slpsPostEvent != nil && psnForPID != nil }
+
+/// 成功返回 true
+private func skylightFront(_ w: WinInfo) -> Bool {
+    guard let slpsSetFront, let slpsPostEvent, let psnForPID else { return false }
+    var psn = ProcessSerialNumber()
+    guard withUnsafeMutableBytes(of: &psn, { psnForPID(w.pid, $0.baseAddress!) }) == 0 else { return false }
+    return withUnsafeMutableBytes(of: &psn) { p in
+        guard slpsSetFront(p.baseAddress!, w.id, 0x200) == 0 else { return false }   // 0x200 = userGenerated
+        var bytes = [UInt8](repeating: 0, count: 0xf8)
+        bytes[0x04] = 0xf8
+        bytes[0x3a] = 0x10
+        withUnsafeBytes(of: w.id) { for (i, b) in $0.enumerated() { bytes[0x3c + i] = b } }
+        for i in 0x20..<0x30 { bytes[i] = 0xff }
+        bytes[0x08] = 0x01
+        _ = slpsPostEvent(p.baseAddress!, &bytes)
+        bytes[0x08] = 0x02
+        _ = slpsPostEvent(p.baseAddress!, &bytes)
+        return true
+    }
+}
+
+/// 跳到指定窗口：SkyLight 按窗口 ID 提到最前（能跨桌面空间），AX 负责取消最小化和在 app 内部提窗口。
+/// 两条路都没成就只激活 app。成功返回 nil，否则返回给用户看的原因
 @discardableResult
 func focusWindow(_ w: WinInfo) -> String? {
     guard let app = NSRunningApplication(processIdentifier: w.pid) else { return "\(w.app) 已经退出了" }
-    var target: AXUIElement?
-    var raw: CFTypeRef?
-    if AXUIElementCopyAttributeValue(AXUIElementCreateApplication(w.pid), kAXWindowsAttribute as CFString, &raw) == .success,
-       let wins = raw as? [AXUIElement] {
-        let near = { (r: CGRect) in
-            abs(r.minX - w.bounds.minX) <= 6 && abs(r.minY - w.bounds.minY) <= 6
-                && abs(r.width - w.bounds.width) <= 6 && abs(r.height - w.bounds.height) <= 6
-        }
-        target = wins.first { axWindowID($0) == w.id }
-            ?? wins.first { axFrame($0).map(near) ?? false }
-            ?? (wins.count == 1 ? wins[0] : nil)
-    }
-    if let t = target {
+    if app.isHidden { app.unhide() }
+    let m = axMatch(w)
+    if let t = m.target {
         AXUIElementSetAttributeValue(t, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+    }
+    let front = skylightFront(w)
+    if let t = m.target {
         // 先在 app 内部把它提到最前再激活 app，否则多窗口 app 会切到它自己记的「上一个」窗口
         AXUIElementSetAttributeValue(t, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(t, kAXRaiseAction as CFString)
     }
-    if app.isHidden { app.unhide() }
-    app.activate()
-    if target != nil { return nil }
+    if !front { app.activate() }
+    if debugLog { print("focus", w.id, w.app, "skylight=\(front)", "ax=\(m.by)", "axErr=\(m.error.rawValue)", m.windows.map(axDescribe)); fflush(stdout) }
+    if front || m.target != nil { return nil }
     return AXIsProcessTrusted() ? "没能定位到具体窗口，只切到了 \(w.app)" : "缺「辅助功能」权限，只能切到 app，无法精确到窗口"
 }
 
@@ -145,12 +205,45 @@ func relaunch() {
 
 // MARK: - 截图（ScreenCaptureKit）
 
-/// 截一批窗口。截不到的（被关掉、其他桌面空间没有绘制缓冲）不出现在结果里，调用方保留旧图
-private func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindowID: NSImage] {
-    guard !ids.isEmpty,
-          let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) else { return [:] }
-    var out: [CGWindowID: NSImage] = [:]
-    for w in content.windows where ids.contains(w.windowID) {
+/// ScreenCaptureKit 偶尔会一直不返回（实测：截其他桌面空间的窗口时），给每次调用套个超时，
+/// 免得一个窗口卡住整个刷新循环。超时后那次调用会泄漏在后台，所以超时的窗口要退避一段时间再试
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func take() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true }
+}
+
+nonisolated func withTimeout<T>(_ seconds: Double, _ op: @escaping () async -> T?) async -> T? {
+    let once = Once()
+    return await withCheckedContinuation { (c: CheckedContinuation<T?, Never>) in
+        Task { let r = await op(); if once.take() { c.resume(returning: r) } }
+        Task { try? await Task.sleep(for: .seconds(seconds)); if once.take() { c.resume(returning: nil) } }
+    }
+}
+
+enum Shot { case image(NSImage), failed }
+
+/// SCShareableContent 很重（实测 0.8–3 秒），不能每轮都取。缓存起来，有没见过的窗口或超过 15 秒才重取
+@MainActor private enum SCCache {
+    static var windows: [CGWindowID: SCWindow] = [:]
+    static var fetched = Date.distantPast
+
+    static func get(_ ids: Set<CGWindowID>) async -> [SCWindow] {
+        if ids.contains(where: { windows[$0] == nil }) || Date().timeIntervalSince(fetched) > 15,
+           let content = await withTimeout(8, { try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) }) {
+            windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+            fetched = Date()
+        }
+        return ids.compactMap { windows[$0] }
+    }
+}
+
+/// 截一批窗口。返回 .failed 的是超时或出错的，调用方保留旧图并退避
+@MainActor
+func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindowID: Shot] {
+    guard !ids.isEmpty else { return [:] }
+    var out: [CGWindowID: Shot] = [:]
+    for w in await SCCache.get(ids) {
         let filter = SCContentFilter(desktopIndependentWindow: w)
         let r = filter.contentRect
         let scale = CGFloat(filter.pointPixelScale)
@@ -161,11 +254,18 @@ private func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindo
         cfg.height = Int(r.height * k)
         cfg.showsCursor = false
         cfg.ignoreShadowsSingleWindow = true
-        if let img = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) {
-            out[w.windowID] = NSImage(cgImage: img, size: r.size)
-        }
+        let img = await withTimeout(2.5) { try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) }
+        out[w.windowID] = img.map { .image(NSImage(cgImage: $0, size: r.size)) } ?? .failed
     }
     return out
+}
+
+// MARK: - 设置项
+
+enum Prefs {
+    static var thumbs: Bool { UserDefaults.standard.object(forKey: "wallThumbs") as? Bool ?? true }
+    static var interval: Double { max(1, UserDefaults.standard.object(forKey: "wallInterval") as? Double ?? 2) }
+    static var allSpaces: Bool { UserDefaults.standard.object(forKey: "allSpaces") as? Bool ?? true }
 }
 
 // MARK: - 监控名单
@@ -208,6 +308,7 @@ final class Wall {
     var axOK = Permission.accessibility
 
     @ObservationIgnored private var live: Task<Void, Never>?
+    @ObservationIgnored private var backoff: [CGWindowID: Date] = [:]   // 截图超时的窗口，到这个时间前不再截
     @ObservationIgnored private var icons: [pid_t: NSImage] = [:]
     private var url: URL { Store.shared.home.appendingPathComponent("marks.json") }
 
@@ -378,7 +479,7 @@ final class Wall {
         axOK = Permission.accessibility
     }
 
-    /// 窗口墙显示期间每秒刷新窗口列表并重截缩略图
+    /// 窗口墙显示期间按设置的间隔刷新窗口列表并重截缩略图
     func startLive() {
         live?.cancel()
         live = Task { @MainActor in
@@ -387,13 +488,21 @@ final class Wall {
                 let ids = Set(monitored.map(\.id))
                 // Procman 被隐藏或窗口被完全挡住时不截图
                 let shown = NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) }
-                if shown, UserDefaults.standard.object(forKey: "wallThumbs") as? Bool ?? true, screenOK {
-                    let shots = await capture(ids, maxEdge: 900)
+                if shown, Prefs.thumbs, screenOK {
+                    let now = Date()
+                    let due = ids.filter { (backoff[$0] ?? .distantPast) <= now }
+                    let shots = await capture(due, maxEdge: 900)
                     if Task.isCancelled { break }
-                    for (id, img) in shots { thumbs[id] = img }
+                    for (id, shot) in shots {
+                        switch shot {
+                        case .image(let img): thumbs[id] = img; backoff[id] = nil
+                        case .failed: backoff[id] = now.addingTimeInterval(30)
+                        }
+                    }
+                    if debugLog { print("capture due=\(due.count) ok=\(shots.values.filter { if case .image = $0 { true } else { false } }.count)"); fflush(stdout) }
                 }
                 if thumbs.keys.contains(where: { !ids.contains($0) }) { thumbs = thumbs.filter { ids.contains($0.key) } }
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(Prefs.interval))
             }
         }
     }

@@ -59,7 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { HotKeys.shared.registerAll() }
+        MainActor.assumeIsolated {
+            if CommandLine.arguments.contains("--diagnose") {
+                Task { await runDiagnose(); exit(0) }
+                return
+            }
+            HotKeys.shared.registerAll()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

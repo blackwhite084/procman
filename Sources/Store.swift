@@ -445,7 +445,7 @@ final class Store {
 
 // MARK: - 进程底层
 
-private let debugLog = ProcessInfo.processInfo.environment["PROCMAN_DEBUG"] != nil
+let debugLog = ProcessInfo.processInfo.environment["PROCMAN_DEBUG"] != nil
 
 private func err(_ msg: String) -> NSError {
     NSError(domain: "procman", code: 1, userInfo: [NSLocalizedDescriptionKey: msg])
