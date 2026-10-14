@@ -304,6 +304,7 @@ private struct WallTile: View {
                 Text(w.label).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 if !w.onScreen { Badge(text: "其他桌面 / 最小化") }
+                StillBadge(id: w.id)
                 if wall.via(w) == .app { Badge(text: "整个 app") }
             case .closed(let m):
                 Text(m.title.isEmpty ? m.app : "\(m.app) — \(m.title)").font(.callout.weight(.medium))
@@ -398,6 +399,39 @@ private struct NoteRow: View {
         }
         wall.editing = nil
     }
+}
+
+/// 画面动静：最近 30 秒内变过 = 活动中，否则显示静止时长
+private struct StillBadge: View {
+    @Environment(Wall.self) private var wall
+    let id: CGWindowID
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 5)) { ctx in
+            if Prefs.watch || wall.lastSample[id] != nil {
+                if let t = wall.stillFor(id, now: ctx.date) {
+                    if t < 30 {
+                        Label("活动中", systemImage: "circle.fill")
+                            .font(.caption2.weight(.medium)).foregroundStyle(.green)
+                            .labelStyle(.titleAndIcon).imageScale(.small).fixedSize()
+                    } else {
+                        Badge(text: "静止 \(duration(t))")
+                            .help("画面已经 \(duration(t)) 没有变化（统计从 Procman 开始采样算起）")
+                    }
+                } else if wall.lastSample[id] != nil || wall.screenOK {
+                    Badge(text: "无法采样").help("最近没能截到这个窗口，静止时长未知")
+                }
+            }
+        }
+    }
+}
+
+func duration(_ t: TimeInterval) -> String {
+    let s = Int(t)
+    if s < 60 { return "\(s) 秒" }
+    if s < 3600 { return "\(s / 60) 分钟" }
+    if s < 86400 { return "\(s / 3600) 小时\(s % 3600 / 60 > 0 ? " \(s % 3600 / 60) 分" : "")" }
+    return "\(s / 86400) 天"
 }
 
 private struct Badge: View {
@@ -659,6 +693,9 @@ struct SettingsView: View {
     @AppStorage("wallThumbs") private var thumbsOn = true
     @AppStorage("wallInterval") private var interval = 2.0
     @AppStorage("allSpaces") private var allSpaces = true
+    @AppStorage("wallWatch") private var watch = true
+    @AppStorage("wallWatchInterval") private var watchInterval = 10.0
+    @AppStorage("wallMotion") private var motion = 0.03
 
     var body: some View {
         Form {
@@ -673,6 +710,17 @@ struct SettingsView: View {
                     ForEach([1.0, 2, 5, 10], id: \.self) { Text("\(Int($0)) 秒").tag($0) }
                 }
                 .disabled(!thumbsOn)
+                Toggle("后台检测画面变化（统计静止多久）", isOn: $watch)
+                Picker("后台检测间隔", selection: $watchInterval) {
+                    ForEach([5.0, 10, 30, 60], id: \.self) { Text("\(Int($0)) 秒").tag($0) }
+                }
+                .disabled(!watch)
+                Picker("画面变化多少算「在动」", selection: $motion) {
+                    ForEach([0.01, 0.03, 0.05, 0.1], id: \.self) { Text("≥ \(Int($0 * 100))%").tag($0) }
+                }
+                .disabled(!watch)
+                Text("窗口墙没在显示时也定期截小图对比，卡片上显示「活动中」或「静止 x 分钟」")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("主窗口出现在所有桌面", isOn: $allSpaces)
                     .onChange(of: allSpaces) { applySpaces() }
                 Text("切换桌面（Space）时 Procman 主窗口跟着过去。注意：其他桌面上的窗口系统通常不重绘，缩略图会停在你最后一次看到它时的样子")

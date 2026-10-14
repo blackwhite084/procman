@@ -221,29 +221,83 @@ nonisolated func withTimeout<T>(_ seconds: Double, _ op: @escaping () async -> T
     }
 }
 
-enum Shot { case image(NSImage), failed }
+/// 同一时间只允许一个 ScreenCaptureKit 请求在跑。
+/// 超时只是我们不等了，请求本身还挂在系统的 replayd 里；继续发新请求会越堆越多，
+/// 实测会把 replayd 堵死，连系统自带的 screencapture 都截不了。所以没返回之前一律不发新的
+private final class SCGate: @unchecked Sendable {
+    static let shared = SCGate()
+    private let lock = NSLock()
+    private var busy = false
+    func enter() -> Bool { lock.lock(); defer { lock.unlock() }; if busy { return false }; busy = true; return true }
+    func leave() { lock.lock(); busy = false; lock.unlock() }
+}
 
-/// SCShareableContent 很重（实测 0.8–3 秒），不能每轮都取。缓存起来，有没见过的窗口或超过 15 秒才重取
+/// 过闸门的 ScreenCaptureKit 调用：闸门被占（上一个请求还没回来）直接返回 nil
+nonisolated func gated<T>(_ seconds: Double, _ op: @escaping () async -> T?) async -> T? {
+    guard SCGate.shared.enter() else { return nil }
+    return await withTimeout(seconds) {
+        let r = await op()
+        SCGate.shared.leave()
+        return r
+    }
+}
+
+enum Shot { case image(NSImage, [UInt8]), failed }
+
+/// 画面指纹：缩成 64×40 灰度。只用来判断「画面动没动」，和截图尺寸无关
+private let fpW = 64, fpH = 40
+
+nonisolated func fingerprint(_ img: CGImage) -> [UInt8] {
+    var px = [UInt8](repeating: 0, count: fpW * fpH)
+    px.withUnsafeMutableBytes { buf in
+        guard let ctx = CGContext(data: buf.baseAddress, width: fpW, height: fpH, bitsPerComponent: 8, bytesPerRow: fpW,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return }
+        ctx.interpolationQuality = .medium
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: fpW, height: fpH))
+    }
+    return px
+}
+
+/// 亮度变化超过 20 的格子占比 ≥ ratio（默认 3%）就算在动；光标闪烁、转圈动画这种小范围变化不算
+nonisolated func changed(_ a: [UInt8], _ b: [UInt8], ratio: Double = Prefs.motionRatio) -> Bool {
+    guard a.count == b.count else { return true }
+    let need = max(1, Int((Double(a.count) * ratio).rounded(.up)))
+    var n = 0
+    for i in a.indices where abs(Int(a[i]) - Int(b[i])) > 20 {
+        n += 1
+        if n >= need { return true }
+    }
+    return false
+}
+
+/// SCShareableContent 很重（实测 0.8–3 秒），而且取的过程中会把正在进行的截图一起拖住。
+/// 所以缓存起来，只在出现没见过的窗口、或窗口尺寸变了（截图比例会错）时才重取
 @MainActor private enum SCCache {
     static var windows: [CGWindowID: SCWindow] = [:]
-    static var fetched = Date.distantPast
+    static var lastTry = Date.distantPast
 
-    static func get(_ ids: Set<CGWindowID>) async -> [SCWindow] {
-        if ids.contains(where: { windows[$0] == nil }) || Date().timeIntervalSince(fetched) > 15,
-           let content = await withTimeout(8, { try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) }) {
-            windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
-            fetched = Date()
+    static func get(_ wins: [WinInfo]) async -> [SCWindow] {
+        let stale = wins.contains { w in
+            guard let c = windows[w.id] else { return true }
+            return abs(c.frame.width - w.bounds.width) > 1 || abs(c.frame.height - w.bounds.height) > 1
         }
-        return ids.compactMap { windows[$0] }
+        // 取不到的窗口（比如刚关掉）别每轮都重取
+        if stale, Date().timeIntervalSince(lastTry) > 5 {
+            lastTry = Date()
+            if let content = await gated(10, { try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false) }) {
+                windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+            }
+        }
+        return wins.compactMap { windows[$0.id] }
     }
 }
 
 /// 截一批窗口。返回 .failed 的是超时或出错的，调用方保留旧图并退避
 @MainActor
-func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindowID: Shot] {
-    guard !ids.isEmpty else { return [:] }
+func capture(_ wins: [WinInfo], maxEdge: CGFloat) async -> [CGWindowID: Shot] {
+    guard !wins.isEmpty else { return [:] }
     var out: [CGWindowID: Shot] = [:]
-    for w in await SCCache.get(ids) {
+    for w in await SCCache.get(wins) {
         let filter = SCContentFilter(desktopIndependentWindow: w)
         let r = filter.contentRect
         let scale = CGFloat(filter.pointPixelScale)
@@ -254,8 +308,8 @@ func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindowID: Sho
         cfg.height = Int(r.height * k)
         cfg.showsCursor = false
         cfg.ignoreShadowsSingleWindow = true
-        let img = await withTimeout(2.5) { try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) }
-        out[w.windowID] = img.map { .image(NSImage(cgImage: $0, size: r.size)) } ?? .failed
+        let img = await gated(5) { try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg) }
+        out[w.windowID] = img.map { .image(NSImage(cgImage: $0, size: r.size), fingerprint($0)) } ?? .failed
     }
     return out
 }
@@ -265,6 +319,9 @@ func capture(_ ids: Set<CGWindowID>, maxEdge: CGFloat) async -> [CGWindowID: Sho
 enum Prefs {
     static var thumbs: Bool { UserDefaults.standard.object(forKey: "wallThumbs") as? Bool ?? true }
     static var interval: Double { max(1, UserDefaults.standard.object(forKey: "wallInterval") as? Double ?? 2) }
+    static var motionRatio: Double { UserDefaults.standard.object(forKey: "wallMotion") as? Double ?? 0.03 }
+    static var watch: Bool { UserDefaults.standard.object(forKey: "wallWatch") as? Bool ?? true }
+    static var watchInterval: Double { max(2, UserDefaults.standard.object(forKey: "wallWatchInterval") as? Double ?? 10) }
     static var allSpaces: Bool { UserDefaults.standard.object(forKey: "allSpaces") as? Bool ?? true }
 }
 
@@ -307,7 +364,12 @@ final class Wall {
     var screenOK = Permission.screen
     var axOK = Permission.accessibility
 
-    @ObservationIgnored private var live: Task<Void, Never>?
+    var lastChange: [CGWindowID: Date] = [:]   // 画面最后一次变化
+    var lastSample: [CGWindowID: Date] = [:]   // 最后一次截图成功
+    @ObservationIgnored private var watcher: Task<Void, Never>?
+    @ObservationIgnored private var liveRequested = false   // 窗口墙页正在显示
+    @ObservationIgnored private var kick = false             // 立即开始下一轮
+    @ObservationIgnored private var prints: [CGWindowID: (fp: [UInt8], big: Bool)] = [:]
     @ObservationIgnored private var backoff: [CGWindowID: Date] = [:]   // 截图超时的窗口，到这个时间前不再截
     @ObservationIgnored private var icons: [pid_t: NSImage] = [:]
     private var url: URL { Store.shared.home.appendingPathComponent("marks.json") }
@@ -479,33 +541,61 @@ final class Wall {
         axOK = Permission.accessibility
     }
 
-    /// 窗口墙显示期间按设置的间隔刷新窗口列表并重截缩略图
-    func startLive() {
-        live?.cancel()
-        live = Task { @MainActor in
+    /// 常驻采样循环，启动时开一次。
+    /// 窗口墙在看：按设置的间隔截清晰缩略图；没在看：按后台间隔截小图，只用来统计画面静止了多久
+    func startWatching() {
+        guard watcher == nil else { return }
+        watcher = Task { @MainActor in
             while !Task.isCancelled {
                 refresh()
-                let ids = Set(monitored.map(\.id))
-                // Procman 被隐藏或窗口被完全挡住时不截图
-                let shown = NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) }
-                if shown, Prefs.thumbs, screenOK {
+                let mon = monitored
+                let ids = Set(mon.map(\.id))
+                // Procman 被隐藏或窗口被完全挡住时算没在看
+                let shown = liveRequested && NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) }
+                let big = shown && Prefs.thumbs
+                if (big || Prefs.watch), screenOK {
                     let now = Date()
-                    let due = ids.filter { (backoff[$0] ?? .distantPast) <= now }
-                    let shots = await capture(due, maxEdge: 900)
-                    if Task.isCancelled { break }
+                    let due = mon.filter { (backoff[$0.id] ?? .distantPast) <= now }
+                    let shots = await capture(due, maxEdge: big ? 900 : 240)
                     for (id, shot) in shots {
                         switch shot {
-                        case .image(let img): thumbs[id] = img; backoff[id] = nil
-                        case .failed: backoff[id] = now.addingTimeInterval(30)
+                        case .image(let img, let fp):
+                            if big || thumbs[id] == nil { thumbs[id] = img }
+                            backoff[id] = nil
+                            lastSample[id] = now
+                            // 截图尺寸切换时缩放结果略有差异，只换基准不算变化
+                            if let old = prints[id] {
+                                if old.big == big && changed(old.fp, fp) { lastChange[id] = now }
+                            } else if lastChange[id] == nil {
+                                lastChange[id] = now
+                            }
+                            prints[id] = (fp, big)
+                        case .failed:
+                            backoff[id] = now.addingTimeInterval(10)
                         }
                     }
-                    if debugLog { print("capture due=\(due.count) ok=\(shots.values.filter { if case .image = $0 { true } else { false } }.count)"); fflush(stdout) }
+                    if debugLog { print("capture big=\(big) due=\(due.count) shots=\(shots.count)"); fflush(stdout) }
                 }
                 if thumbs.keys.contains(where: { !ids.contains($0) }) { thumbs = thumbs.filter { ids.contains($0.key) } }
-                try? await Task.sleep(for: .seconds(Prefs.interval))
+                prints = prints.filter { ids.contains($0.key) }
+                // 分小段睡，窗口墙一打开就能立刻截一轮
+                let interval = shown ? Prefs.interval : Prefs.watchInterval
+                let until = Date().addingTimeInterval(interval)
+                kick = false
+                while Date() < until && !kick && !Task.isCancelled { try? await Task.sleep(for: .milliseconds(250)) }
             }
         }
     }
 
-    func stopLive() { live?.cancel(); live = nil }
+    func startLive() { liveRequested = true; kick = true }
+
+    func stopLive() { liveRequested = false }
+
+    /// 画面静止了多少秒；nil = 还没采样过或最近采样不到（别把截图失败当成静止）
+    func stillFor(_ id: CGWindowID, now: Date = Date()) -> TimeInterval? {
+        guard let c = lastChange[id], let s = lastSample[id],
+              now.timeIntervalSince(s) < max(60, Prefs.watchInterval * 3) else { return nil }
+        return now.timeIntervalSince(c)
+    }
+
 }

@@ -65,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             HotKeys.shared.registerAll()
+            Wall.shared.startWatching()
         }
     }
 

@@ -24,12 +24,34 @@ func runDiagnose() async {
         out += "  AX kAXWindows err=\(m.error.rawValue) count=\(m.windows.count) 匹配方式=\(m.by)\n"
         for e in m.windows { out += "    - \(axDescribe(e))\n" }
         let t0 = Date()
-        let shot = await capture([w.id], maxEdge: 600)[w.id]
+        let shot = await capture([w], maxEdge: 600)[w.id]
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         switch shot {
-        case .image(let img): out += "  截图 成功 \(Int(img.size.width))×\(Int(img.size.height)) \(ms)ms\n"
+        case .image(let img, _): out += "  截图 成功 \(Int(img.size.width))×\(Int(img.size.height)) \(ms)ms\n"
         case .failed: out += "  截图 失败/超时 \(ms)ms\n"
         case nil: out += "  截图 ScreenCaptureKit 列表里没有这个窗口 \(ms)ms\n"
+        }
+    }
+    // 动静采样：同样的窗口每 3 秒截一张小图，看其他桌面上的窗口能不能稳定截到新画面
+    if !targets.isEmpty {
+        out += "\n动静采样（每 3 秒一次 ×10，+ = 画面变了，. = 没变，x = 没截到）\n"
+        var last: [CGWindowID: [UInt8]] = [:]
+        var marks: [CGWindowID: String] = [:]
+        for i in 0..<11 {
+            let shots = await capture(targets, maxEdge: 240)
+            for w in targets {
+                switch shots[w.id] {
+                case .image(_, let fp):
+                    if i > 0 { marks[w.id, default: ""] += last[w.id].map { changed($0, fp) ? "+" : "." } ?? "?" }
+                    last[w.id] = fp
+                default:
+                    if i > 0 { marks[w.id, default: ""] += "x" }
+                }
+            }
+            if i < 10 { try? await Task.sleep(for: .seconds(3)) }
+        }
+        for w in targets {
+            out += "  [\(w.id)] \(w.onScreen ? "当前桌面" : "其他桌面") \(marks[w.id] ?? "") \(w.app) — \(w.title.prefix(40))\n"
         }
     }
     try? out.write(to: home.deletingLastPathComponent().appendingPathComponent("diagnose.txt"), atomically: true, encoding: .utf8)
