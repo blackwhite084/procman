@@ -8,7 +8,7 @@ import Observation
 //   手机 → Mac  未认证：pair{device} 申请配对（Mac 弹窗确认），hello{token} 用已配对的 token 登录
 //              已认证：start/stop/restart{id}、log{id}（空 id = 取消订阅）、wall{on}、focus{win}、
 //                     memo.add{text}、memo.toggle{id}、memo.edit{id,text}、memo.delete{id}、
-//                     memo.resume{id} 恢复暂停的窗口监控、wall.pause{win} 暂停监控转为待办
+//                     memo.resume{id} 恢复暂停的窗口监控、wall.pause{win} 暂停监控转为待办、wall.unmark{win} 取消监控
 //   Mac → 手机  paired{token,host}、denied{reason}、unauthorized、welcome{host}、
 //              state{ts,services,wall,memos,...}（有变化才发）、log{id,reset,data}、toast{text}
 //   二进制帧    窗口墙缩略图：4 字节大端窗口 id + JPEG
@@ -242,6 +242,10 @@ final class Remote {
         case "memo.edit": Memos.shared.edit(id, m["text"] as? String ?? "")
         case "memo.delete": Memos.shared.delete(id)
         case "memo.resume": Memos.shared.resume(id)
+        case "wall.unmark":
+            if let win = m["win"] as? Int, case .live(let w)? = Wall.shared.items.first(where: { Int($0.id) == win }) {
+                Wall.shared.unmark(w)
+            }
         case "wall.pause":
             if let win = m["win"] as? Int, let item = Wall.shared.items.first(where: { Int($0.id) == win }) {
                 Wall.shared.pause(item)
@@ -347,6 +351,7 @@ final class Remote {
                 d = ["id": Int(w.id), "app": w.app, "title": w.title, "onScreen": w.onScreen,
                      "thumb": wall.thumbs[w.id] != nil, "closed": false]
                 d["note"] = wall.note(w)
+                d["wholeApp"] = wall.via(w) == .app
                 d["changed"] = wall.lastChange[w.id].map { Int($0.timeIntervalSince1970) }
                 d["sampled"] = wall.lastSample[w.id].map { Int($0.timeIntervalSince1970) }
             case .closed(let m):

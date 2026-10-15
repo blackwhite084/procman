@@ -48,6 +48,7 @@ class WallItem {
   String get title => raw['title'] as String? ?? '';
   String? get note => raw['note'] as String?;
   bool get closed => raw['closed'] == true;
+  bool get wholeApp => raw['wholeApp'] == true;
   bool get onScreen => raw['onScreen'] != false;
   int? get changed => raw['changed'] as int?;
   int? get sampled => raw['sampled'] as int?;
@@ -390,6 +391,7 @@ class Conn extends ChangeNotifier {
   void deleteMemo(String id) => _send({'t': 'memo.delete', 'id': id});
   void resumeMemo(String id) => _send({'t': 'memo.resume', 'id': id});
   void pauseWindow(int win) => _send({'t': 'wall.pause', 'win': win});
+  void unmarkWindow(int win) => _send({'t': 'wall.unmark', 'win': win});
 
   void watchWall(bool on) {
     if (_wallOn == on) return;

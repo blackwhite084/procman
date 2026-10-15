@@ -417,16 +417,45 @@ class WallTile extends StatelessWidget {
             ),
           ListTile(
             leading: const Icon(Icons.pause_circle_outline),
-            title: const Text('暂停监控（转为待办）'),
+            title: Text(item.wholeApp ? '暂停监控整个 ${item.app}（转为待办）' : '暂停监控（转为待办）'),
             subtitle: const Text('之后在「待办 → 已暂停」里恢复'),
             onTap: () {
               Navigator.pop(ctx);
               conn.pauseWindow(item.id);
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.visibility_off_outlined, color: Colors.redAccent),
+            title: Text(item.wholeApp ? '取消监控整个 ${item.app}' : '取消监控'),
+            subtitle: item.note == null ? null : const Text('备注会一起删除'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              if (await _confirmUnmark(context)) conn.unmarkWindow(item.id);
+            },
+          ),
         ]),
       ),
     );
+  }
+
+  Future<bool> _confirmUnmark(BuildContext context) async {
+    if (item.note == null) return true;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(item.wholeApp ? '取消监控整个 ${item.app}？' : '取消监控「${item.label}」？'),
+        content: Text('备注「${item.note}」会一起删除。只是暂时不想看的话可以用「暂停监控」。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('保留')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('取消监控'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   void _zoom(BuildContext context) {
