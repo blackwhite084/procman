@@ -53,7 +53,8 @@ final class Remote {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var pairing = false
     @ObservationIgnored private var jpegs: [CGWindowID: (NSImage, Data)] = [:]
-    @ObservationIgnored let hostName = Host.current().localizedName ?? "Mac"
+    /// 广播和手机上显示的名字，PROCMAN_NAME 可覆盖（演示 / 多实例时用）
+    @ObservationIgnored let hostName = ProcessInfo.processInfo.environment["PROCMAN_NAME"] ?? Host.current().localizedName ?? "Mac"
 
     private var url: URL { Store.shared.home.appendingPathComponent("remote.json") }
     private static let decoder = { let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return d }()
