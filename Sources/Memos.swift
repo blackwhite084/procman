@@ -9,6 +9,15 @@ struct Memo: Codable, Identifiable, Hashable {
     var text: String
     var added = Date()
     var done: Date?
+    var paused: Paused?   // 从窗口墙暂停下来的监控，恢复时还原
+}
+
+/// 暂停监控时摘下来的标记（单个窗口或整个 app 二选一）
+struct Paused: Codable, Hashable {
+    var window: WinMark?
+    var app: AppMark?
+    var label: String     // 转成待办时的默认文字，用来判断恢复时要不要把改过的文字写回备注
+    var closed: Bool?     // true = 窗口关闭自动转的，窗口重开时自动恢复；nil = 手动暂停
 }
 
 /// 存在 ~/.procman/memos.json，每次改动立即写盘
@@ -26,7 +35,8 @@ final class Memos {
         if let d = try? Data(contentsOf: url), let m = try? dec.decode([Memo].self, from: d) { items = m }
     }
 
-    var open: [Memo] { items.filter { $0.done == nil } }
+    var open: [Memo] { items.filter { $0.done == nil && $0.paused == nil } }
+    var paused: [Memo] { items.filter { $0.done == nil && $0.paused != nil } }
     var done: [Memo] { items.filter { $0.done != nil }.sorted { $0.done! > $1.done! } }
 
     func add(_ text: String) {
@@ -34,6 +44,18 @@ final class Memos {
         guard !t.isEmpty else { return }
         items.insert(Memo(text: t), at: 0)
         save()
+    }
+
+    func addPaused(_ text: String, _ p: Paused) {
+        items.insert(Memo(text: text, paused: p), at: 0)
+        save()
+    }
+
+    /// 恢复监控：标记放回窗口墙，待办移除
+    func resume(_ id: String) {
+        guard let m = items.first(where: { $0.id == id }), let p = m.paused else { return }
+        Wall.shared.restore(p, text: m.text)
+        delete(id)
     }
 
     /// 改成空 = 删除
@@ -64,7 +86,8 @@ final class Memos {
     func move(from: IndexSet, to: Int) {
         var o = open
         o.move(fromOffsets: from, toOffset: to)
-        items = o + items.filter { $0.done != nil }
+        let ids = Set(o.map(\.id))
+        items = o + items.filter { !ids.contains($0.id) }
         save()
     }
 
@@ -107,6 +130,13 @@ struct MemoColumn: View {
                 if memos.open.isEmpty {
                     Text("零散的事记在这里，做完勾掉").font(.callout).foregroundStyle(.tertiary)
                         .listRowSeparator(.hidden)
+                }
+                if !memos.paused.isEmpty {
+                    Section {
+                        ForEach(memos.paused) { m in MemoRow(memo: m) }
+                    } header: {
+                        Label("已暂停的窗口 \(memos.paused.count)", systemImage: "pause.circle").font(.caption)
+                    }
                 }
                 if !memos.done.isEmpty {
                     Section {
@@ -167,7 +197,11 @@ private struct MemoRow: View {
                         .onTapGesture { editing = true }
                         .help("点击编辑")
                 }
-                Text(ago(memo.done ?? memo.added)).font(.caption2).foregroundStyle(.tertiary)
+                Text(pausedNote + ago(memo.done ?? memo.added)).font(.caption2).foregroundStyle(.tertiary)
+            }
+            if memo.paused != nil && memo.done == nil {
+                Button { memos.resume(memo.id) } label: { Image(systemName: "play.circle") }
+                    .buttonStyle(.borderless).foregroundStyle(Color.accentColor).help("恢复监控，放回窗口墙")
             }
             if hover && !editing {
                 Button { memos.delete(memo.id) } label: { Image(systemName: "xmark").font(.caption) }
@@ -179,10 +213,18 @@ private struct MemoRow: View {
         .contextMenu {
             Button("编辑") { editing = true }
             Button(done ? "标为未完成" : "完成") { memos.toggle(memo.id) }
+            if memo.paused != nil && !done { Button("恢复监控") { memos.resume(memo.id) } }
             Button("复制") { copy(memo.text) }
             Divider()
             Button("删除", role: .destructive) { memos.delete(memo.id) }
         }
+    }
+
+    /// 已暂停的条目注明来源窗口，文字被改成备注后也知道是哪个窗口
+    private var pausedNote: String {
+        guard let p = memo.paused else { return "" }
+        let what = p.closed == true ? "窗口已关闭，重开后自动恢复" : "已暂停"
+        return memo.text == p.label ? "\(what) · " : "\(p.label) · \(what) · "
     }
 
     private func commit() {

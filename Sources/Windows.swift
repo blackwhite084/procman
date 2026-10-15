@@ -369,9 +369,12 @@ final class Wall {
     @ObservationIgnored private var watcher: Task<Void, Never>?
     @ObservationIgnored private var liveRequested = false   // 窗口墙页正在显示
     @ObservationIgnored private var kick = false             // 立即开始下一轮
+    /// 正在看窗口墙的手机数，有人看就按前台间隔截清晰缩略图
+    @ObservationIgnored var remoteViewers = 0 { didSet { if remoteViewers > oldValue { kick = true } } }
     @ObservationIgnored private var prints: [CGWindowID: (fp: [UInt8], big: Bool)] = [:]
     @ObservationIgnored private var backoff: [CGWindowID: Date] = [:]   // 截图超时的窗口，到这个时间前不再截
     @ObservationIgnored private var icons: [pid_t: NSImage] = [:]
+    @ObservationIgnored private var goneSince: [CGWindowID: Date] = [:]   // 标记的窗口从什么时候起找不到了
     private var url: URL { Store.shared.home.appendingPathComponent("marks.json") }
 
     private init() {
@@ -489,6 +492,47 @@ final class Wall {
         save()
     }
 
+    /// 暂停监控：从窗口墙摘下来转成一条「已暂停」待办。整个 app 监控的就暂停整个 app
+    func pause(_ item: WallItem) {
+        var p: Paused
+        var note: String?
+        switch item {
+        case .live(let w) where via(w) == .app:
+            guard let b = w.bundle, let i = marks.apps.firstIndex(where: { $0.bundle == b }) else { return }
+            let m = marks.apps.remove(at: i)
+            p = Paused(app: m, label: "整个 \(m.name)")
+            note = m.note
+        case .live(let w):
+            guard let i = marks.windows.firstIndex(where: { $0.id == w.id }) else { return }
+            var m = marks.windows.remove(at: i)
+            if !w.title.isEmpty { m.title = w.title }
+            p = Paused(window: m, label: m.title.isEmpty ? m.app : "\(m.app) — \(m.title)")
+            note = m.note
+        case .closed(let m):
+            marks.windows.removeAll { $0.id == m.id }
+            p = Paused(window: m, label: m.title.isEmpty ? m.app : "\(m.app) — \(m.title)", closed: true)
+            note = m.note
+        }
+        save()
+        if selection == item.id { selection = nil }
+        Memos.shared.addPaused(note ?? p.label, p)
+    }
+
+    /// 恢复监控；待办文字改过就当作新的备注。窗口在暂停期间换了 id 的，交给 reattach 找回
+    func restore(_ p: Paused, text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let edited = t != p.label && !t.isEmpty
+        if var m = p.app {
+            if edited { m.note = t }
+            if !marks.apps.contains(where: { $0.bundle == m.bundle }) { marks.apps.append(m) }
+        } else if var m = p.window {
+            if edited { m.note = t }
+            if !marks.windows.contains(where: { $0.id == m.id }) { marks.windows.append(m) }
+        }
+        save()
+        reattach()
+    }
+
     /// keepNotes: 只清没写备注的失效条目
     func prune(keepNotes: Bool) {
         let live = Set(windows.map(\.id))
@@ -536,9 +580,73 @@ final class Wall {
 
     func refresh() {
         let list = listWindows()
-        if list != windows { windows = list }
+        if list != windows { windows = list; reattach() }
+        autoPause()
         screenOK = Permission.screen
         axOK = Permission.accessibility
+    }
+
+    /// 窗口关掉 20 秒以上、写了备注的标记，转成「窗口已关闭」待办（窗口重开时自动放回墙上）。
+    /// 没写备注的留在「管理监控」的失效列表里，窗口重开同样会被找回
+    private func autoPause() {
+        let now = Date()
+        let lost = stale
+        let ids = Set(lost.map(\.id))
+        goneSince = goneSince.filter { ids.contains($0.key) }
+        for m in lost where m.note != nil {
+            let since = goneSince[m.id] ?? now
+            goneSince[m.id] = since
+            if now.timeIntervalSince(since) > 20 { pause(.closed(m)) }
+        }
+    }
+
+    /// app / Mac 重启后窗口会换新的 CGWindowID，旧标记就失效了。
+    /// 在同一个 app 新出现、还没被标记的窗口里找回来，备注跟着走：
+    /// 标题完全相同 > 标题「 — 」后的项目名相同（VS Code / Cursor 等标题随当前文件变）> 该 app 只剩一个失效标记和一个候选窗口。
+    /// 候选既有失效标记，也有因窗口关闭自动转成的待办（找回就恢复监控）
+    private func reattach() {
+        struct Lost { var mark: WinMark; var memo: Memo? }
+        let lost = stale.map { Lost(mark: $0, memo: nil) }
+            + Memos.shared.paused.compactMap { m in m.paused?.closed == true ? m.paused?.window.map { Lost(mark: $0, memo: m) } : nil }
+        guard !lost.isEmpty else { return }
+        let marked = Set(marks.windows.map(\.id))
+        var free = windows.filter { !marked.contains($0.id) && $0.bundle != nil && $0.bounds.width > 80 && $0.bounds.height > 60 }
+        var moved = 0
+        func take(_ l: Lost, _ match: (WinInfo) -> Bool) -> Bool {
+            let hits = free.filter { $0.bundle == l.mark.bundle && match($0) }
+            guard hits.count == 1, let w = hits.first else { return false }
+            var m = l.mark
+            m.id = w.id
+            if !w.title.isEmpty { m.title = w.title }
+            if let memo = l.memo {
+                Memos.shared.delete(memo.id)
+                if memo.text != memo.paused?.label { m.note = memo.text }
+                marks.windows.append(m)
+            } else if let i = marks.windows.firstIndex(where: { $0.id == l.mark.id }) {
+                marks.windows[i] = m
+            } else {
+                return false
+            }
+            goneSince[l.mark.id] = nil
+            free.removeAll { $0.id == w.id }
+            moved += 1
+            return true
+        }
+        func project(_ t: String) -> String? {
+            let p = t.components(separatedBy: " — ")
+            return p.count > 1 ? p.last!.trimmingCharacters(in: .whitespaces) : nil
+        }
+        var left: [Lost] = []
+        for l in lost where l.mark.bundle != nil {
+            let t = l.mark.title
+            if !t.isEmpty, take(l, { $0.title == t }) { continue }
+            if let p = project(t), take(l, { project($0.title) == p }) { continue }
+            left.append(l)
+        }
+        for l in left where left.filter({ $0.mark.bundle == l.mark.bundle }).count == 1 {
+            _ = take(l) { _ in true }
+        }
+        if moved > 0 { save() }
     }
 
     /// 常驻采样循环，启动时开一次。
@@ -551,7 +659,8 @@ final class Wall {
                 let mon = monitored
                 let ids = Set(mon.map(\.id))
                 // Procman 被隐藏或窗口被完全挡住时算没在看
-                let shown = liveRequested && NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) }
+                let shown = (liveRequested && NSApp.windows.contains { isMainWindow($0) && $0.occlusionState.contains(.visible) })
+                    || remoteViewers > 0
                 let big = shown && Prefs.thumbs
                 if (big || Prefs.watch), screenOK {
                     let now = Date()

@@ -35,6 +35,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>NSLocalNetworkUsageDescription</key><string>让局域网内的手机 App 发现并连接 Procman</string>
+  <key>NSBonjourServices</key><array><string>_procman._tcp</string></array>
 </dict></plist>
 EOF
 # ad-hoc 签名每次编译 cdhash 都会变，系统就把它当成新 app，「屏幕录制 / 辅助功能」授权随之失效。

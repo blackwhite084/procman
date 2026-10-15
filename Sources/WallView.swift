@@ -126,7 +126,7 @@ enum WallItem: Identifiable {
 
 extension Wall {
     var items: [WallItem] {
-        monitored.map(WallItem.live) + stale.filter { $0.note != nil }.map(WallItem.closed)
+        monitored.map(WallItem.live)   // 关掉的窗口自动转成待办，不再占格子
     }
 
     static func columns(_ n: Int) -> Int { n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4 }
@@ -331,6 +331,7 @@ private struct WallTile: View {
         Divider()
         switch item {
         case .live(let w):
+            Button(wall.via(w) == .app ? "暂停监控整个 \(w.app)（转为待办）" : "暂停监控（转为待办）") { wall.pause(item) }
             Button(wall.via(w) == .app ? "取消监控整个 \(w.app)" : "取消监控此窗口") { wall.unmark(w) }
             if wall.via(w) == .window, let b = w.bundle, !wall.appMarked(b) {
                 Button("改为监控整个 \(w.app)") { wall.toggleApp(bundle: b, name: w.app) }
@@ -726,6 +727,7 @@ struct SettingsView: View {
                 Text("切换桌面（Space）时 Procman 主窗口跟着过去。注意：其他桌面上的窗口系统通常不重绘，缩略图会停在你最后一次看到它时的样子")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            RemoteSection()
             Section("全局快捷键") {
                 ForEach(HotKeyAction.allCases) { a in
                     LabeledContent(a.name) { HotKeyRecorder(action: a) }
@@ -757,6 +759,36 @@ struct SettingsView: View {
             Label("已授权", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
         } else {
             Button("去授权…", action: request)
+        }
+    }
+}
+
+private struct RemoteSection: View {
+    private let remote = Remote.shared
+
+    var body: some View {
+        Section("手机远程") {
+            Toggle("允许局域网内的手机连接", isOn: Binding(get: { remote.enabled }, set: { remote.setEnabled($0) }))
+            if let e = remote.error {
+                Text(e).font(.caption).foregroundStyle(.red)
+            } else if let p = remote.port {
+                Text("已在 \(lanAddresses().map { "\($0):\(p)" }.joined(separator: "、")) 广播，手机 App 会自动发现；首次连接要在这台 Mac 上点「允许」")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            ForEach(remote.devices) { d in
+                LabeledContent {
+                    HStack {
+                        if remote.online[d.token] != nil {
+                            Text("在线").foregroundStyle(.green)
+                        } else if let s = d.seen {
+                            Text("\(duration(Date().timeIntervalSince(s)))前").foregroundStyle(.secondary)
+                        }
+                        Button("移除") { remote.unpair(d.token) }
+                    }
+                } label: {
+                    Label(d.name, systemImage: "iphone")
+                }
+            }
         }
     }
 }
